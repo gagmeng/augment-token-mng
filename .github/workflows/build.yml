@@ -203,7 +203,8 @@ jobs:
         with:
           args: --verbose --target ${{ matrix.target }}
 
-      - name: List build artifacts for debugging
+      - name: List build artifacts for debugging (Unix)
+        if: matrix.platform != 'windows-latest'
         run: |
           echo "=== Build Artifacts Debug ==="
           echo "Target: ${{ matrix.target }}"
@@ -216,8 +217,30 @@ jobs:
             ls -la src-tauri/target/${{ matrix.target }}/release/bundle/
           fi
 
-      - name: Prepare release files
-        id: prepare-files
+      - name: List build artifacts for debugging (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          Write-Host "=== Build Artifacts Debug ==="
+          Write-Host "Target: ${{ matrix.target }}"
+          Write-Host "Platform: ${{ matrix.platform }}"
+          
+          $targetPath = "src-tauri/target/${{ matrix.target }}/release"
+          if (Test-Path $targetPath) {
+            Get-ChildItem -Path $targetPath -Recurse -Include "*.exe", "*.msi" | ForEach-Object { Write-Host $_.FullName }
+          } else {
+            Write-Host "Target path does not exist: $targetPath"
+          }
+          
+          $bundlePath = "$targetPath/bundle"
+          if (Test-Path $bundlePath) {
+            Write-Host "Bundle directory contents:"
+            Get-ChildItem -Path $bundlePath -Recurse | ForEach-Object { Write-Host $_.FullName }
+          }
+
+      - name: Prepare release files (Unix)
+        if: matrix.platform != 'windows-latest'
+        id: prepare-files-unix
         run: |
           echo "=== Preparing Release Files ==="
           RELEASE_FILES=""
@@ -230,14 +253,6 @@ jobs:
             fi
             if ls src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app 1> /dev/null 2>&1; then
               RELEASE_FILES="$RELEASE_FILES$(find src-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app" | tr '\n' ' ')"
-            fi
-          elif [[ "${{ matrix.platform }}" == "windows-latest" ]]; then
-            # Windows files
-            if ls src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi 1> /dev/null 2>&1; then
-              RELEASE_FILES="$RELEASE_FILES$(find src-tauri/target/${{ matrix.target }}/release/bundle/msi -name "*.msi" | tr '\n' ' ')"
-            fi
-            if [[ -f "src-tauri/target/${{ matrix.target }}/release/ATM.exe" ]]; then
-              RELEASE_FILES="$RELEASE_FILES src-tauri/target/${{ matrix.target }}/release/ATM.exe "
             fi
           elif [[ "${{ matrix.platform }}" == "ubuntu-22.04" ]]; then
             # Linux files
@@ -252,8 +267,34 @@ jobs:
           echo "Files to upload: $RELEASE_FILES"
           echo "release-files=$RELEASE_FILES" >> $GITHUB_OUTPUT
 
+      - name: Prepare release files (Windows)
+        if: matrix.platform == 'windows-latest'
+        id: prepare-files-windows
+        shell: pwsh
+        run: |
+          Write-Host "=== Preparing Release Files ==="
+          $releaseFiles = @()
+          
+          # Check for Windows files
+          $msiPath = "src-tauri/target/${{ matrix.target }}/release/bundle/msi"
+          if (Test-Path $msiPath) {
+            $msiFiles = Get-ChildItem -Path $msiPath -Filter "*.msi"
+            foreach ($file in $msiFiles) {
+              $releaseFiles += $file.FullName
+            }
+          }
+          
+          $exePath = "src-tauri/target/${{ matrix.target }}/release/ATM.exe"
+          if (Test-Path $exePath) {
+            $releaseFiles += $exePath
+          }
+          
+          $releaseFilesString = $releaseFiles -join " "
+          Write-Host "Files to upload: $releaseFilesString"
+          echo "release-files=$releaseFilesString" >> $env:GITHUB_OUTPUT
+
       - name: Upload artifacts to Release
-        if: steps.prepare-files.outputs.release-files != ''
+        if: (steps.prepare-files-unix.outputs.release-files != '' && matrix.platform != 'windows-latest') || (steps.prepare-files-windows.outputs.release-files != '' && matrix.platform == 'windows-latest')
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.generate-changelog.outputs.tag }}
@@ -261,7 +302,7 @@ jobs:
           body: ${{ needs.generate-changelog.outputs.changelog }}
           draft: false
           prerelease: false
-          files: ${{ steps.prepare-files.outputs.release-files }}
+          files: ${{ matrix.platform == 'windows-latest' && steps.prepare-files-windows.outputs.release-files || steps.prepare-files-unix.outputs.release-files }}
 
   # Notify on Telegram when all builds complete
   notify-telegram:
