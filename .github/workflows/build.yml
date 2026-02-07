@@ -203,19 +203,65 @@ jobs:
         with:
           args: --verbose --target ${{ matrix.target }}
 
+      - name: List build artifacts for debugging
+        run: |
+          echo "=== Build Artifacts Debug ==="
+          echo "Target: ${{ matrix.target }}"
+          echo "Platform: ${{ matrix.platform }}"
+          find src-tauri/target/${{ matrix.target }}/release -name "*.dmg" -o -name "*.app" -o -name "*.deb" -o -name "*.AppImage" -o -name "*.exe" -o -name "*.msi" 2>/dev/null || echo "No artifacts found in expected location"
+          
+          # Also check bundle directory structure
+          if [ -d "src-tauri/target/${{ matrix.target }}/release/bundle" ]; then
+            echo "Bundle directory contents:"
+            ls -la src-tauri/target/${{ matrix.target }}/release/bundle/
+          fi
+
+      - name: Prepare release files
+        id: prepare-files
+        run: |
+          echo "=== Preparing Release Files ==="
+          RELEASE_FILES=""
+          
+          # Check for different file types based on platform
+          if [[ "${{ matrix.platform }}" == "macos-latest" ]]; then
+            # macOS files
+            if ls src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg 1> /dev/null 2>&1; then
+              RELEASE_FILES="$RELEASE_FILES$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | tr '\n' ' ')"
+            fi
+            if ls src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app 1> /dev/null 2>&1; then
+              RELEASE_FILES="$RELEASE_FILES$(find src-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app" | tr '\n' ' ')"
+            fi
+          elif [[ "${{ matrix.platform }}" == "windows-latest" ]]; then
+            # Windows files
+            if ls src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi 1> /dev/null 2>&1; then
+              RELEASE_FILES="$RELEASE_FILES$(find src-tauri/target/${{ matrix.target }}/release/bundle/msi -name "*.msi" | tr '\n' ' ')"
+            fi
+            if [[ -f "src-tauri/target/${{ matrix.target }}/release/ATM.exe" ]]; then
+              RELEASE_FILES="$RELEASE_FILES src-tauri/target/${{ matrix.target }}/release/ATM.exe "
+            fi
+          elif [[ "${{ matrix.platform }}" == "ubuntu-22.04" ]]; then
+            # Linux files
+            if ls src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb 1> /dev/null 2>&1; then
+              RELEASE_FILES="$RELEASE_FILES$(find src-tauri/target/${{ matrix.target }}/release/bundle/deb -name "*.deb" | tr '\n' ' ')"
+            fi
+            if ls src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage 1> /dev/null 2>&1; then
+              RELEASE_FILES="$RELEASE_FILES$(find src-tauri/target/${{ matrix.target }}/release/bundle/appimage -name "*.AppImage" | tr '\n' ' ')"
+            fi
+          fi
+          
+          echo "Files to upload: $RELEASE_FILES"
+          echo "release-files=$RELEASE_FILES" >> $GITHUB_OUTPUT
+
       - name: Upload artifacts to Release
+        if: steps.prepare-files.outputs.release-files != ''
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.generate-changelog.outputs.tag }}
           name: 'ATM v${{ needs.generate-changelog.outputs.version }}'
           body: ${{ needs.generate-changelog.outputs.changelog }}
-          draft: true
-          files: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
-            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
-            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
-            src-tauri/target/${{ matrix.target }}/release/ATM.exe
+          draft: false
+          prerelease: false
+          files: ${{ steps.prepare-files.outputs.release-files }}
 
   # Notify on Telegram when all builds complete
   notify-telegram:
@@ -257,20 +303,20 @@ jobs:
           REPO_ESCAPED=$(escape_markdown "$REPO_NAME")
 
           MESSAGE="
-          🎉 *New Release Built*
+          🎉 *New Release Published*
 
           📦 *ATM v${VERSION_ESCAPED}*
           🏷️ Repository: \`${REPO_ESCAPED}\`
 
           ✅ All platform builds completed successfully:
-          • Windows \(x64\)
-          • macOS \(Apple Silicon\)
-          • macOS \(Intel\)
-          • Linux \(x64\)
+          • Windows \(x64\) \- MSI & EXE
+          • macOS \(Apple Silicon\) \- DMG
+          • macOS \(Intel\) \- DMG  
+          • Linux \(x64\) \- DEB & AppImage
 
-          🔗 [View Draft Release](https://github.com/${REPO_NAME}/releases)
+          🔗 [Download Release](https://github.com/${REPO_NAME}/releases/tag/${VERSION_ESCAPED})
 
-          ⚠️ *Action Required:* Please review and publish the draft release\.
+          🎊 *Release is now live and ready for download\!*
           "
 
           curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
