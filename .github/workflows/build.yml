@@ -29,6 +29,16 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      - name: Debug Git state
+        run: |
+          echo "=== Git Debug Information ==="
+          echo "Current branch: $(git branch --show-current)"
+          echo "Current commit: $(git rev-parse HEAD)"
+          echo "Available tags:"
+          git tag -l | head -10
+          echo "Package.json version: $(node -p "require('./package.json').version")"
+          echo "Remote URL: $(git remote get-url origin)"
+
       - name: Determine tag
         id: tag
         run: |
@@ -42,6 +52,26 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Tag: $TAG"
 
+      - name: Create and push tag if not exists
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          
+          # Check if tag already exists locally
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists locally"
+          else
+            echo "Creating new tag: $TAG"
+            git tag "$TAG"
+          fi
+          
+          # Check if tag exists on remote
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
+            echo "Tag $TAG already exists on remote"
+          else
+            echo "Pushing tag $TAG to remote"
+            git push origin "$TAG"
+          fi
+
       - name: Get version
         id: version
         run: |
@@ -50,11 +80,22 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
+      - name: Verify tag exists
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Error: Tag $TAG does not exist after creation attempt"
+            echo "Available tags:"
+            git tag -l | head -10
+            exit 1
+          fi
+          echo "✅ Tag $TAG verified successfully"
+
       - name: Generate changelog
         id: changelog
         run: |
-          # Get the previous tag
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          # Get the previous tag with improved error handling
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo "")
 
           if [ -z "$PREVIOUS_TAG" ]; then
             echo "No previous tag found, using all commits"
