@@ -271,6 +271,29 @@ jobs:
         with:
           args: --verbose --target ${{ matrix.target }}
 
+      - name: List build artifacts (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          Write-Host "=== Windows Build Artifacts ==="
+          $bundlePath = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          if (Test-Path $bundlePath) {
+            Write-Host "`nBundle directory structure:"
+            Get-ChildItem -Path $bundlePath -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
+          }
+          
+          $exePath = "src-tauri/target/${{ matrix.target }}/release/ATM.exe"
+          if (Test-Path $exePath) {
+            Write-Host "`nStandalone EXE found: $exePath"
+            Get-Item $exePath | Select-Object FullName, Length
+          }
+
+      - name: List build artifacts (Unix)
+        if: matrix.platform != 'windows-latest'
+        run: |
+          echo "=== Build Artifacts ==="
+          find src-tauri/target/${{ matrix.target }}/release/bundle -type f 2>/dev/null || echo "No bundle directory found"
+
       - name: Prepare release files (Unix)
         if: matrix.platform != 'windows-latest'
         id: prepare-unix
@@ -289,9 +312,38 @@ jobs:
         id: prepare-windows
         shell: pwsh
         run: |
-          $files = Get-ChildItem -Path "src-tauri/target/${{ matrix.target }}/release/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue
-          $releaseFiles = ($files | ForEach-Object { $_.FullName }) -join " "
-          echo "release-files=$releaseFiles" >> $env:GITHUB_OUTPUT
+          $releaseFiles = @()
+          
+          # Find MSI installer
+          $msiPath = "src-tauri/target/${{ matrix.target }}/release/bundle/msi"
+          if (Test-Path $msiPath) {
+            $msiFiles = Get-ChildItem -Path $msiPath -Filter "*.msi" -ErrorAction SilentlyContinue
+            foreach ($file in $msiFiles) {
+              $releaseFiles += $file.FullName
+              Write-Host "Found MSI: $($file.FullName)"
+            }
+          }
+          
+          # Find NSIS installer (EXE)
+          $nsisPath = "src-tauri/target/${{ matrix.target }}/release/bundle/nsis"
+          if (Test-Path $nsisPath) {
+            $exeFiles = Get-ChildItem -Path $nsisPath -Filter "*.exe" -ErrorAction SilentlyContinue
+            foreach ($file in $exeFiles) {
+              $releaseFiles += $file.FullName
+              Write-Host "Found NSIS EXE: $($file.FullName)"
+            }
+          }
+          
+          # Find standalone EXE (if exists)
+          $exePath = "src-tauri/target/${{ matrix.target }}/release/ATM.exe"
+          if (Test-Path $exePath) {
+            $releaseFiles += $exePath
+            Write-Host "Found standalone EXE: $exePath"
+          }
+          
+          $releaseFilesString = $releaseFiles -join " "
+          Write-Host "All release files: $releaseFilesString"
+          echo "release-files=$releaseFilesString" >> $env:GITHUB_OUTPUT
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
