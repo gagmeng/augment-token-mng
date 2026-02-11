@@ -1,12 +1,15 @@
+use crate::AppState;
 use crate::data::storage::common::{
-    AccountSyncManager as CommonAccountSyncManager,
-    ClientAccountSyncRequest, ServerAccountSyncResponse, AccountSyncStatus,
-    AccountStorage,
+    AccountStorage, AccountSyncManager as CommonAccountSyncManager, AccountSyncStatus,
+    ClientAccountSyncRequest, ServerAccountSyncResponse,
 };
 use crate::data::subscription::Subscription;
-use crate::AppState;
-use tauri::State;
+use crate::data::subscription::storage::{
+    SubscriptionDualStorage, SubscriptionLocalStorage, initialize_subscription_storage_manager,
+};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tauri::State;
 
 /// 订阅列表响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,15 +17,33 @@ pub struct SubscriptionListResponse {
     pub subscriptions: Vec<Subscription>,
 }
 
+async fn get_subscription_storage_manager(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+) -> Result<Arc<SubscriptionDualStorage>, String> {
+    if let Some(manager) = state.subscription_storage_manager.lock().unwrap().clone() {
+        return Ok(manager);
+    }
+
+    initialize_subscription_storage_manager(app, state)
+        .await
+        .map_err(|e| format!("Failed to initialize subscription storage manager: {}", e))?;
+
+    state
+        .subscription_storage_manager
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Subscription storage manager not initialized".to_string())
+}
+
 /// 列出所有订阅
 #[tauri::command]
 pub async fn subscription_list(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubscriptionListResponse, String> {
-    let storage_manager = {
-        let guard = state.subscription_storage_manager.lock().unwrap();
-        guard.clone().ok_or("Subscription storage manager not initialized")?
-    };
+    let storage_manager = get_subscription_storage_manager(&app, &state).await?;
 
     let subscriptions = storage_manager
         .load_accounts()
@@ -30,10 +51,29 @@ pub async fn subscription_list(
         .map_err(|e| format!("Failed to load subscriptions: {}", e))?;
 
     // 过滤掉已删除的
-    let active_subscriptions: Vec<Subscription> = subscriptions
-        .into_iter()
-        .filter(|s| !s.deleted)
-        .collect();
+    let active_subscriptions: Vec<Subscription> =
+        subscriptions.into_iter().filter(|s| !s.deleted).collect();
+
+    Ok(SubscriptionListResponse {
+        subscriptions: active_subscriptions,
+    })
+}
+
+/// 直接从本地文件加载订阅（不依赖 storage manager 初始化）
+#[tauri::command]
+pub async fn subscription_load_local(
+    app: tauri::AppHandle,
+) -> Result<SubscriptionListResponse, String> {
+    let local_storage = SubscriptionLocalStorage::new(&app)
+        .map_err(|e| format!("Failed to create Subscription local storage: {}", e))?;
+
+    let subscriptions = local_storage
+        .load_accounts()
+        .await
+        .map_err(|e| format!("Failed to load Subscription local accounts: {}", e))?;
+
+    let active_subscriptions: Vec<Subscription> =
+        subscriptions.into_iter().filter(|s| !s.deleted).collect();
 
     Ok(SubscriptionListResponse {
         subscriptions: active_subscriptions,
@@ -48,7 +88,9 @@ pub async fn subscription_add(
 ) -> Result<Subscription, String> {
     let storage_manager = {
         let guard = state.subscription_storage_manager.lock().unwrap();
-        guard.clone().ok_or("Subscription storage manager not initialized")?
+        guard
+            .clone()
+            .ok_or("Subscription storage manager not initialized")?
     };
 
     storage_manager
@@ -67,7 +109,9 @@ pub async fn subscription_update(
 ) -> Result<Subscription, String> {
     let storage_manager = {
         let guard = state.subscription_storage_manager.lock().unwrap();
-        guard.clone().ok_or("Subscription storage manager not initialized")?
+        guard
+            .clone()
+            .ok_or("Subscription storage manager not initialized")?
     };
 
     storage_manager
@@ -80,13 +124,12 @@ pub async fn subscription_update(
 
 /// 删除订阅
 #[tauri::command]
-pub async fn subscription_delete(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn subscription_delete(id: String, state: State<'_, AppState>) -> Result<(), String> {
     let storage_manager = {
         let guard = state.subscription_storage_manager.lock().unwrap();
-        guard.clone().ok_or("Subscription storage manager not initialized")?
+        guard
+            .clone()
+            .ok_or("Subscription storage manager not initialized")?
     };
 
     storage_manager
@@ -104,7 +147,9 @@ pub async fn subscription_sync_accounts(
 ) -> Result<ServerAccountSyncResponse<Subscription>, String> {
     let storage_manager = {
         let guard = state.subscription_storage_manager.lock().unwrap();
-        guard.clone().ok_or("Subscription storage manager not initialized")?
+        guard
+            .clone()
+            .ok_or("Subscription storage manager not initialized")?
     };
 
     let req: ClientAccountSyncRequest<Subscription> = serde_json::from_str(&req_json)
@@ -119,10 +164,7 @@ pub async fn subscription_sync_accounts(
         Err(e) => {
             println!(
                 "Subscription sync_accounts failed (last_version={}, upserts={}, deletions={}): {}",
-                last_version,
-                upserts_len,
-                deletions_len,
-                e
+                last_version, upserts_len, deletions_len, e
             );
             Err(format!("Sync failed: {}", e))
         }
@@ -135,10 +177,14 @@ pub async fn subscription_sync_to_database(
 ) -> Result<AccountSyncStatus, String> {
     let storage_manager = {
         let guard = state.subscription_storage_manager.lock().unwrap();
-        guard.clone().ok_or("Subscription storage manager not initialized")?
+        guard
+            .clone()
+            .ok_or("Subscription storage manager not initialized")?
     };
 
-    storage_manager.sync_local_to_remote().await
+    storage_manager
+        .sync_local_to_remote()
+        .await
         .map_err(|e| format!("Sync failed: {}", e))
 }
 
@@ -148,10 +194,14 @@ pub async fn subscription_sync_from_database(
 ) -> Result<AccountSyncStatus, String> {
     let storage_manager = {
         let guard = state.subscription_storage_manager.lock().unwrap();
-        guard.clone().ok_or("Subscription storage manager not initialized")?
+        guard
+            .clone()
+            .ok_or("Subscription storage manager not initialized")?
     };
 
-    storage_manager.sync_remote_to_local().await
+    storage_manager
+        .sync_remote_to_local()
+        .await
         .map_err(|e| format!("Sync failed: {}", e))
 }
 
@@ -161,10 +211,13 @@ pub async fn subscription_bidirectional_sync(
 ) -> Result<AccountSyncStatus, String> {
     let storage_manager = {
         let guard = state.subscription_storage_manager.lock().unwrap();
-        guard.clone().ok_or("Subscription storage manager not initialized")?
+        guard
+            .clone()
+            .ok_or("Subscription storage manager not initialized")?
     };
 
-    storage_manager.bidirectional_sync().await
+    storage_manager
+        .bidirectional_sync()
+        .await
         .map_err(|e| format!("Sync failed: {}", e))
 }
-

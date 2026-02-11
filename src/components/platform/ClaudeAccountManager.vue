@@ -715,10 +715,8 @@ const setSortType = (type, order) => {
 const loadAccounts = async () => {
   isLoading.value = true
   try {
-    await initSync()
-    const response = await invoke('claude_list')
+    const response = await invoke('claude_load_accounts_local')
     accounts.value = response.accounts || []
-    // 加载当前账户ID
     await loadCurrentAccountId()
   } catch (error) {
     console.error('Failed to load accounts:', error)
@@ -743,10 +741,7 @@ const loadCurrentAccountId = async () => {
 const handleRefresh = async () => {
   isRefreshing.value = true
   try {
-    await initSync()
-    const response = await invoke('claude_list')
-    accounts.value = response.accounts || []
-    await loadCurrentAccountId()
+    await loadAccounts()
     window.$notify?.success($t('common.refreshSuccess'))
   } catch (error) {
     console.error('Failed to refresh accounts:', error)
@@ -1018,8 +1013,9 @@ watch([searchQuery, selectedExpiryFilter], () => {
   currentPage.value = 1
 })
 
-onMounted(async () => {
+onMounted(() => {
   loadViewMode()
-  await loadAccounts()
+  loadAccounts()
+  initSync()
 })
 </script>
