@@ -1,0 +1,331 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'package.json'
+      - 'Cargo.toml'
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - custom
+        default: 'patch'
+      custom_version:
+        description: 'Custom version (only if version_type is custom, e.g., 1.2.3)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  version-and-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.new_version.outputs.version }}
+      tag: ${{ steps.new_version.outputs.tag }}
+      should_release: ${{ steps.check_changes.outputs.should_release }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if version bump needed
+        id: check_changes
+        run: |
+          # For manual trigger, always release
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "Manual trigger - will create release"
+            exit 0
+          fi
+          
+          # For push events, check if there are actual code changes
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "No previous tag found - will create first release"
+            exit 0
+          fi
+          
+          # Check for changes since last tag
+          CHANGES=$(git diff --name-only $LAST_TAG HEAD | grep -E '^(src/|src-tauri/|package\.json|Cargo\.toml)' || true)
+          if [ -n "$CHANGES" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "Code changes detected since $LAST_TAG"
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "No significant changes since $LAST_TAG"
+          fi
+
+      - name: Setup Node.js
+        if: steps.check_changes.outputs.should_release == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Calculate new version
+        if: steps.check_changes.outputs.should_release == 'true'
+        id: new_version
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "Current version: $CURRENT_VERSION"
+          
+          # Determine version bump type
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION_TYPE="${{ github.event.inputs.version_type }}"
+            CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
+          else
+            # Auto bump patch version for push events
+            VERSION_TYPE="patch"
+            CUSTOM_VERSION=""
+          fi
+          
+          if [ "$VERSION_TYPE" = "custom" ]; then
+            if [ -z "$CUSTOM_VERSION" ]; then
+              echo "Error: Custom version required" >&2
+              exit 1
+            fi
+            NEW_VERSION="$CUSTOM_VERSION"
+          else
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+            case "$VERSION_TYPE" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+            NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          fi
+          
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION"
+
+      - name: Update version files
+        if: steps.check_changes.outputs.should_release == 'true'
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.version }}"
+          
+          # Update package.json
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$NEW_VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          
+          # Update Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" src-tauri/Cargo.toml
+          
+          # Update tauri.conf.json
+          node -e "
+            const fs = require('fs');
+            const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+            config.version = '$NEW_VERSION';
+            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(config, null, 2) + '\n');
+          "
+          
+          echo "✅ Version files updated to $NEW_VERSION"
+
+      - name: Commit and tag
+        if: steps.check_changes.outputs.should_release == 'true'
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.version }}"
+          TAG_NAME="v$NEW_VERSION"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+          git commit -m "chore: bump version to $NEW_VERSION [skip ci]" || echo "No changes to commit"
+          git push origin ${{ github.ref_name }} || echo "Nothing to push"
+          
+          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+          git push origin "$TAG_NAME"
+          
+          echo "✅ Created and pushed tag: $TAG_NAME"
+
+  generate-changelog:
+    needs: version-and-tag
+    if: needs.version-and-tag.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.version-and-tag.outputs.tag }}
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION="${{ needs.version-and-tag.outputs.version }}"
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          if [ -z "$PREVIOUS_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            COMMITS=$(git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          
+          CHANGELOG="## 🎉 What's New in v${VERSION}
+
+          ### 📝 Changes
+          $COMMITS
+
+          ### 📦 Installation
+          Download the appropriate file for your platform:
+          - **Windows**: \`.msi\` installer
+          - **macOS (Apple Silicon)**: \`.dmg\` for M1/M2/M3 Macs
+          - **macOS (Intel)**: \`.dmg\` for Intel Macs
+          - **Linux**: \`.deb\` or \`.AppImage\`
+
+          ### 🔗 Links
+          - [Full Changelog](https://github.com/${{ github.repository }}/compare/$PREVIOUS_TAG...v${VERSION})
+          - [Documentation](https://github.com/${{ github.repository }}#readme)"
+          
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+  build:
+    needs: [version-and-tag, generate-changelog]
+    if: needs.version-and-tag.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            name: macOS-Apple-Silicon
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            name: macOS-Intel
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: Windows
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            name: Linux
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version-and-tag.outputs.tag }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            pkg-config \
+            build-essential
+
+      - name: Rust setup
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --verbose --target ${{ matrix.target }}
+
+      - name: Prepare release files (Unix)
+        if: matrix.platform != 'windows-latest'
+        id: prepare-unix
+        run: |
+          RELEASE_FILES=""
+          if [[ "${{ matrix.platform }}" == "macos-latest" ]]; then
+            RELEASE_FILES=$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | tr '\n' ' ')
+          else
+            RELEASE_FILES=$(find src-tauri/target/${{ matrix.target }}/release/bundle/deb -name "*.deb" 2>/dev/null | tr '\n' ' ')
+            RELEASE_FILES="$RELEASE_FILES $(find src-tauri/target/${{ matrix.target }}/release/bundle/appimage -name "*.AppImage" 2>/dev/null | tr '\n' ' ')"
+          fi
+          echo "release-files=$RELEASE_FILES" >> $GITHUB_OUTPUT
+
+      - name: Prepare release files (Windows)
+        if: matrix.platform == 'windows-latest'
+        id: prepare-windows
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path "src-tauri/target/${{ matrix.target }}/release/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue
+          $releaseFiles = ($files | ForEach-Object { $_.FullName }) -join " "
+          echo "release-files=$releaseFiles" >> $env:GITHUB_OUTPUT
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.version-and-tag.outputs.tag }}
+          name: 'ATM v${{ needs.version-and-tag.outputs.version }}'
+          body: ${{ needs.generate-changelog.outputs.changelog }}
+          draft: false
+          prerelease: false
+          files: ${{ matrix.platform == 'windows-latest' && steps.prepare-windows.outputs.release-files || steps.prepare-unix.outputs.release-files }}
+
+  notify-package-managers:
+    needs: [version-and-tag, build]
+    if: needs.version-and-tag.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to Homebrew tap
+        if: vars.TAP_DISPATCH_TOKEN != ''
+        run: |
+          TAG="${{ needs.version-and-tag.outputs.tag }}"
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.TAP_DISPATCH_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/zhaochengcube/homebrew-atm/dispatches \
+            -d "{\"event_type\":\"atm_release\", \"client_payload\":{\"tag\":\"$TAG\"}}" \
+            && echo "✅ Homebrew tap notified" || echo "⚠️ Homebrew notification failed (non-critical)"
+
+      - name: Dispatch to Scoop bucket
+        if: vars.TAP_DISPATCH_TOKEN != ''
+        run: |
+          TAG="${{ needs.version-and-tag.outputs.tag }}"
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.TAP_DISPATCH_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/zhaochengcube/scoop-atm/dispatches \
+            -d "{\"event_type\":\"atm_release\", \"client_payload\":{\"tag\":\"$TAG\"}}" \
+            && echo "✅ Scoop bucket notified" || echo "⚠️ Scoop notification failed (non-critical)"

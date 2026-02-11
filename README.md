@@ -139,6 +139,21 @@ cargo tauri build    # 构建生产版本
    - VSCode及其Fork使用[配套插件](https://github.com/zhaochengcube/augment-code-auto)
    - JetBrains系列产品使用[此插件](https://github.com/zhaochengcube/augment-token-mng/releases/download/v0.5.0/augment-token-mng-1.0.zip) 注意：JetBrains插件可能导致封号
 
+## 开发者指南
+
+### 自动发布流程
+
+本项目使用 GitHub Actions 实现完全自动化的版本管理和发布流程：
+
+- **自动发布**：推送代码到 main/master 分支时自动触发版本升级和发布
+- **手动发布**：在 Actions 页面手动触发，可选择版本类型（patch/minor/major/custom）
+- **多平台构建**：自动构建 Windows、macOS（Intel & Apple Silicon）、Linux 版本
+- **自动创建 Release**：自动生成 changelog 并创建 GitHub Release
+
+详细说明请查看：
+- [自动发布工作流程说明](./docs/AUTO_RELEASE_WORKFLOW.md)
+- [工作流迁移指南](./docs/MIGRATION_GUIDE.md)
+
 ## 许可证
 
 本项目是开源项目，采用 MIT 许可证。
