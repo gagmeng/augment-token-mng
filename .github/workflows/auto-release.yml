@@ -191,7 +191,7 @@ jobs:
 
           ### 📦 Installation
           Download the appropriate file for your platform:
-          - **Windows**: \`.msi\` installer
+          - **Windows**: \`.msi\` or \`.exe\` installer
           - **macOS (Apple Silicon)**: \`.dmg\` for M1/M2/M3 Macs
           - **macOS (Intel)**: \`.dmg\` for Intel Macs
           - **Linux**: \`.deb\` or \`.AppImage\`
@@ -264,96 +264,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build application
+      - name: Build and Release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: --verbose --target ${{ matrix.target }}
-
-      - name: List build artifacts (Windows)
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: |
-          Write-Host "=== Windows Build Artifacts ==="
-          $bundlePath = "src-tauri/target/${{ matrix.target }}/release/bundle"
-          if (Test-Path $bundlePath) {
-            Write-Host "`nBundle directory structure:"
-            Get-ChildItem -Path $bundlePath -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
-          }
-          
-          $exePath = "src-tauri/target/${{ matrix.target }}/release/ATM.exe"
-          if (Test-Path $exePath) {
-            Write-Host "`nStandalone EXE found: $exePath"
-            Get-Item $exePath | Select-Object FullName, Length
-          }
-
-      - name: List build artifacts (Unix)
-        if: matrix.platform != 'windows-latest'
-        run: |
-          echo "=== Build Artifacts ==="
-          find src-tauri/target/${{ matrix.target }}/release/bundle -type f 2>/dev/null || echo "No bundle directory found"
-
-      - name: Prepare release files (Unix)
-        if: matrix.platform != 'windows-latest'
-        id: prepare-unix
-        run: |
-          RELEASE_FILES=""
-          if [[ "${{ matrix.platform }}" == "macos-latest" ]]; then
-            RELEASE_FILES=$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | tr '\n' ' ')
-          else
-            RELEASE_FILES=$(find src-tauri/target/${{ matrix.target }}/release/bundle/deb -name "*.deb" 2>/dev/null | tr '\n' ' ')
-            RELEASE_FILES="$RELEASE_FILES $(find src-tauri/target/${{ matrix.target }}/release/bundle/appimage -name "*.AppImage" 2>/dev/null | tr '\n' ' ')"
-          fi
-          echo "release-files=$RELEASE_FILES" >> $GITHUB_OUTPUT
-
-      - name: Prepare release files (Windows)
-        if: matrix.platform == 'windows-latest'
-        id: prepare-windows
-        shell: pwsh
-        run: |
-          $releaseFiles = @()
-          
-          # Find MSI installer
-          $msiPath = "src-tauri/target/${{ matrix.target }}/release/bundle/msi"
-          if (Test-Path $msiPath) {
-            $msiFiles = Get-ChildItem -Path $msiPath -Filter "*.msi" -ErrorAction SilentlyContinue
-            foreach ($file in $msiFiles) {
-              $releaseFiles += $file.FullName
-              Write-Host "Found MSI: $($file.FullName)"
-            }
-          }
-          
-          # Find NSIS installer (EXE)
-          $nsisPath = "src-tauri/target/${{ matrix.target }}/release/bundle/nsis"
-          if (Test-Path $nsisPath) {
-            $exeFiles = Get-ChildItem -Path $nsisPath -Filter "*.exe" -ErrorAction SilentlyContinue
-            foreach ($file in $exeFiles) {
-              $releaseFiles += $file.FullName
-              Write-Host "Found NSIS EXE: $($file.FullName)"
-            }
-          }
-          
-          # Find standalone EXE (if exists)
-          $exePath = "src-tauri/target/${{ matrix.target }}/release/ATM.exe"
-          if (Test-Path $exePath) {
-            $releaseFiles += $exePath
-            Write-Host "Found standalone EXE: $exePath"
-          }
-          
-          $releaseFilesString = $releaseFiles -join " "
-          Write-Host "All release files: $releaseFilesString"
-          echo "release-files=$releaseFilesString" >> $env:GITHUB_OUTPUT
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.version-and-tag.outputs.tag }}
-          name: 'ATM v${{ needs.version-and-tag.outputs.version }}'
-          body: ${{ needs.generate-changelog.outputs.changelog }}
-          draft: false
+          tagName: ${{ needs.version-and-tag.outputs.tag }}
+          releaseName: 'ATM v${{ needs.version-and-tag.outputs.version }}'
+          releaseBody: ${{ needs.generate-changelog.outputs.changelog }}
+          releaseDraft: false
           prerelease: false
-          files: ${{ matrix.platform == 'windows-latest' && steps.prepare-windows.outputs.release-files || steps.prepare-unix.outputs.release-files }}
+          args: --target ${{ matrix.target }}
 
   notify-package-managers:
     needs: [version-and-tag, build]
