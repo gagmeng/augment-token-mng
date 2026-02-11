@@ -38,15 +38,8 @@
     "windows": {
       "wix": null,
       "nsis": {
-        "license": null,
-        "headerImage": null,
-        "sidebarImage": null,
-        "installerIcon": null,
         "installMode": "perMachine",
-        "languages": [
-          "English",
-          "SimpChinese"
-        ],
+        "languages": ["English", "SimpChinese"],
         "displayLanguageSelector": true
       }
     },
